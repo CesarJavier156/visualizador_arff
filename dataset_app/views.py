@@ -1,40 +1,54 @@
-import matplotlib
-matplotlib.use('Agg')  # Usa backend sin interfaz gráfica
-import matplotlib.pyplot as plt
-import seaborn as sns
-import io
-import base64
+import os
 import pandas as pd
-import arff
+import matplotlib
+matplotlib.use('Agg')  # Evita errores en Render
+import matplotlib.pyplot as plt
 from django.shortcuts import render
+from django.core.files.storage import FileSystemStorage
+from liac_arff import load
+from io import StringIO
 
-def upload_file(request):
+def index(request):
     context = {}
     if request.method == 'POST' and request.FILES.get('file'):
         try:
             file = request.FILES['file']
-            dataset = arff.load(file)
-            df = pd.DataFrame(dataset['data'], columns=[attr[0] for attr in dataset['attributes']])
+            fs = FileSystemStorage()
+            filename = fs.save(file.name, file)
+            uploaded_file_path = fs.path(filename)
 
-            # === Graficar solo 4 columnas si hay muchas ===
-            sample_cols = df.columns[:4] if len(df.columns) >= 4 else df.columns
+            # Leer el archivo ARFF
+            with open(uploaded_file_path, 'r', encoding='utf-8') as f:
+                dataset = load(f)
+            df = pd.DataFrame(dataset['data'], columns=[a[0] for a in dataset['attributes']])
 
-            images = []
-            for col in sample_cols:
-                plt.figure(figsize=(5, 3))
-                sns.histplot(df[col], kde=True)
-                plt.title(f"Distribución de {col}")
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                buf.seek(0)
-                image_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-                images.append(image_base64)
-                plt.close()  # 🔥 Libera memoria después de cada gráfica
+            # Guardar el contenido para mostrarlo en la página
+            with open(uploaded_file_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
 
-            context['columns'] = df.head().to_html(classes='table table-dark table-striped')
-            context['images'] = images
+            # Dividir datos en conjuntos
+            from sklearn.model_selection import train_test_split
+            train_set, temp_set = train_test_split(df, test_size=0.4, random_state=42)
+            validation_set, test_set = train_test_split(temp_set, test_size=0.5, random_state=42)
+
+            # Graficar
+            plt.figure(figsize=(8, 5))
+            df.hist(figsize=(8, 5))
+            graph_path = os.path.join('media', 'graph.png')
+            plt.savefig(graph_path)
+            plt.close()
+
+            context.update({
+                'columns': df.columns,
+                'df_html': df.to_html(classes="table table-striped", index=False),
+                'train_shape': train_set.shape,
+                'validation_shape': validation_set.shape,
+                'test_shape': test_set.shape,
+                'file_content': file_content,
+                'graph_path': '/' + graph_path,
+            })
 
         except Exception as e:
-            context['error'] = f"Ocurrió un error procesando el archivo: {e}"
+            context['error'] = f"Ocurrió un error al procesar el archivo: {e}"
 
     return render(request, 'index.html', context)
