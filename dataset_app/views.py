@@ -1,54 +1,72 @@
-import os
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # Evita errores en Render
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import io, base64, arff
 from django.shortcuts import render
-from django.core.files.storage import FileSystemStorage
-from liac_arff import load
-from io import StringIO
+from sklearn.model_selection import train_test_split
 
 def index(request):
     context = {}
-    if request.method == 'POST' and request.FILES.get('file'):
+
+    if request.method == 'POST' and 'file' in request.FILES:
+        uploaded_file = request.FILES['file']
+
+        # Cargar archivo ARFF correctamente
+        data = arff.load(io.TextIOWrapper(uploaded_file.file, encoding='utf-8'))
+
+        # Convertir a DataFrame
+        df = pd.DataFrame(data['data'], columns=[attr[0] for attr in data['attributes']])
+        context['dataframe_html'] = df.head(10).to_html(classes="table table-striped table-dark", index=False)
+
+        # Separar el dataset (60/20/20)
+        def train_val_test_split(df, rstate=42, shuffle=True, stratify=None):
+            strat = df[stratify] if stratify else None
+            train_set, test_set = train_test_split(df, test_size=0.4, random_state=rstate,
+                                                   shuffle=shuffle, stratify=strat)
+            strat = test_set[stratify] if stratify else None
+            val_set, test_set = train_test_split(test_set, test_size=0.5, random_state=rstate,
+                                                 shuffle=shuffle, stratify=strat)
+            return train_set, val_set, test_set
+
+        # Intentar usar una columna categórica como estratificador
+        strat_col = None
+        for col in df.columns:
+            if df[col].dtype == 'object' or df[col].nunique() < 15:
+                strat_col = col
+                break
+
         try:
-            file = request.FILES['file']
-            fs = FileSystemStorage()
-            filename = fs.save(file.name, file)
-            uploaded_file_path = fs.path(filename)
+            train_set, val_set, test_set = train_val_test_split(df, stratify=strat_col)
+        except Exception:
+            train_set, val_set, test_set = train_val_test_split(df)
 
-            # Leer el archivo ARFF
-            with open(uploaded_file_path, 'r', encoding='utf-8') as f:
-                dataset = load(f)
-            df = pd.DataFrame(dataset['data'], columns=[a[0] for a in dataset['attributes']])
+        # Buscar columnas categóricas o discretas
+        categorical_cols = [c for c in df.columns if df[c].dtype == 'object' or df[c].nunique() < 15]
 
-            # Guardar el contenido para mostrarlo en la página
-            with open(uploaded_file_path, 'r', encoding='utf-8') as f:
-                file_content = f.read()
+        figs = []
+        if categorical_cols:
+            # Usar solo la primera columna categórica
+            col = categorical_cols[0]
+            for dataset, title in [(df, 'Dataset completo'),
+                                   (train_set, 'Train Set'),
+                                   (val_set, 'Validation Set'),
+                                   (test_set, 'Test Set')]:
+                plt.figure(figsize=(7, 5))
+                dataset[col].value_counts().plot(kind='bar', color='#4A90E2', edgecolor='black')
+                plt.title(f'{title} — {col}', fontsize=13, fontweight='bold')
+                plt.xlabel('Categorías')
+                plt.ylabel('Frecuencia')
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png')
+                plt.close()
+                buf.seek(0)
+                figs.append(base64.b64encode(buf.getvalue()).decode('utf-8'))
+        else:
+            context['warning'] = "⚠️ No se encontraron columnas categóricas para graficar."
 
-            # Dividir datos en conjuntos
-            from sklearn.model_selection import train_test_split
-            train_set, temp_set = train_test_split(df, test_size=0.4, random_state=42)
-            validation_set, test_set = train_test_split(temp_set, test_size=0.5, random_state=42)
+        context['graphs'] = figs
 
-            # Graficar
-            plt.figure(figsize=(8, 5))
-            df.hist(figsize=(8, 5))
-            graph_path = os.path.join('media', 'graph.png')
-            plt.savefig(graph_path)
-            plt.close()
-
-            context.update({
-                'columns': df.columns,
-                'df_html': df.to_html(classes="table table-striped", index=False),
-                'train_shape': train_set.shape,
-                'validation_shape': validation_set.shape,
-                'test_shape': test_set.shape,
-                'file_content': file_content,
-                'graph_path': '/' + graph_path,
-            })
-
-        except Exception as e:
-            context['error'] = f"Ocurrió un error al procesar el archivo: {e}"
-
-    return render(request, 'index.html', context)
+    return render(request, 'dataset_app/index.html', context)
